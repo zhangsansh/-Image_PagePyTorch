@@ -31,6 +31,7 @@ transform = transforms.Compose([
 if not os.path.exists("best_model"):
     os.makedirs("best_model")
 
+
 # ===================== 支持多级文件夹的数据集类 =====================
 class CustomDataset(Dataset):
     def __init__(self, root_dir, transform=None, label_mode="folder"):
@@ -62,7 +63,7 @@ class CustomDataset(Dataset):
                 if file.lower().endswith(('jpg', 'jpeg', 'png', 'bmp')):
                     img_path = os.path.join(root, file)
                     # 取当前文件所在文件夹名称作为标签
-                    label_name = os.path.basename(root)
+                    label_name = os.path.basename(root)  # 已修复
                     class_names.add(label_name)
                     data.append((img_path, label_name))
 
@@ -107,10 +108,11 @@ class CustomDataset(Dataset):
         try:
             image = Image.open(img_path).convert("RGB")
             if self.transform:
-                image = self.transform(image)
+                image = transform(image)
             return image, label
         except:
             return torch.zeros(3, 224, 224), label
+
 
 # ===================== 训练线程 =====================
 class TrainThread(QThread):
@@ -119,7 +121,7 @@ class TrainThread(QThread):
     chart_signal = pyqtSignal(list, list, list, list)
     finished_signal = pyqtSignal(dict)
 
-    def __init__(self, batch_size, epochs, lr, data_dir, label_mode, test_split):
+    def __init__(self, batch_size, epochs, lr, data_dir, label_mode, test_split, save_dir):
         super().__init__()
         self.batch_size = batch_size
         self.epochs = epochs
@@ -128,6 +130,7 @@ class TrainThread(QThread):
         self.label_mode = label_mode
         self.test_split = test_split
         self.is_stopped = False
+        self.save_dir = save_dir  # 接收外部设置的路径
 
     def run(self):
         try:
@@ -202,20 +205,31 @@ class TrainThread(QThread):
                 train_acc_list.append(train_acc)
                 test_acc_list.append(test_acc)
 
-                self.log_signal.emit(f"📌 Epoch {epoch + 1} | 损失：{train_loss:.3f} | 训练：{train_acc:.2f} | 测试：{test_acc:.2f}")
+                self.log_signal.emit(
+                    f"📌 Epoch {epoch + 1} | 损失：{train_loss:.3f} | 训练：{train_acc:.2f} | 测试：{test_acc:.2f}")
                 self.chart_signal.emit(epoch_list, loss_list, train_acc_list, test_acc_list)
 
                 if test_acc > best_acc:
                     best_acc = test_acc
-                    save_path = "best_model/best_model.pth"
+
+                    # ============== 自动不重名保存模型 ==============
+                    base_name = "best_model"
+                    ext = ".pth"
+                    counter = 1
+                    while True:
+                        save_path = os.path.join(self.save_dir, f"{base_name}_{counter}{ext}")
+                        if not os.path.exists(save_path):
+                            break
+                        counter += 1
+
                     torch.save({
                         "model": model.state_dict(),
                         "classes": full_dataset.classes
                     }, save_path)
-                    self.log_signal.emit(f"✅ 已自动保存最优模型 -> best_model/best_model.pth")
+                    self.log_signal.emit(f"✅ 已自动保存最优模型 -> {save_path}")
 
             self.log_signal.emit(f"🏁 训练完成！最佳准确率：{best_acc:.2%}")
-            self.log_signal.emit(f"📁 最优模型已自动保存到：best_model/ 文件夹")
+            self.log_signal.emit(f"📁 最优模型已保存到：{self.save_dir}")
             self.finished_signal.emit({})
         except Exception as e:
             self.log_signal.emit(f"❌ 错误：{str(e)}")
@@ -223,11 +237,13 @@ class TrainThread(QThread):
     def stop(self):
         self.is_stopped = True
 
+
 # ===================== 训练界面 =====================
 class TrainTab(QWidget):
     def __init__(self):
         super().__init__()
         self.thread = None
+        self.save_dir = os.path.join(os.getcwd(), "best_model")  # 默认路径
         self.init_ui()
 
     def init_ui(self):
@@ -271,6 +287,12 @@ class TrainTab(QWidget):
         self.test_ratio.setSingleStep(0.05)
         self.test_ratio.setFont(QFont("Microsoft YaHei", 16))
 
+        # 显示保存路径
+        self.save_path_label = QLineEdit(self.save_dir)
+        self.save_path_label.setFont(QFont("Microsoft YaHei", 14))
+        self.save_path_label.setReadOnly(True)
+
+        # 按钮样式
         btn_style = """
         QPushButton {
             font-size:16px;
@@ -283,7 +305,18 @@ class TrainTab(QWidget):
             background-color:#66b1ff;
         }
         """
-
+        save_btn_style = """
+        QPushButton {
+            font-size:16px;
+            padding:12px 18px;
+            border-radius:8px;
+            background-color:#13ce66;
+            color:white;
+        }
+        QPushButton:hover {
+            background-color:#42d885;
+        }
+        """
         stop_style = """
         QPushButton {
             font-size:16px;
@@ -298,14 +331,17 @@ class TrainTab(QWidget):
         """
 
         self.btn_choose = QPushButton("选择数据集")
+        self.btn_save_setting = QPushButton("模型保存设置")  # 新增按钮
         self.btn_start = QPushButton("开始训练")
         self.btn_stop = QPushButton("停止训练")
 
         self.btn_choose.setStyleSheet(btn_style)
+        self.btn_save_setting.setStyleSheet(save_btn_style)
         self.btn_start.setStyleSheet(btn_style)
         self.btn_stop.setStyleSheet(stop_style)
 
         self.btn_choose.clicked.connect(self.choose)
+        self.btn_save_setting.clicked.connect(self.set_save_path)  # 绑定
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
 
@@ -315,7 +351,9 @@ class TrainTab(QWidget):
         form.addRow("分类模式", self.mode)
         form.addRow("测试集比例", self.test_ratio)
         form.addRow("数据路径", self.path)
+        form.addRow("模型保存路径", self.save_path_label)
         form.addWidget(self.btn_choose)
+        form.addWidget(self.btn_save_setting)
         form.addWidget(self.btn_start)
         form.addWidget(self.btn_stop)
 
@@ -345,6 +383,15 @@ class TrainTab(QWidget):
         if p:
             self.path.setText(p)
 
+    # 设置保存路径
+    def set_save_path(self):
+        default_dir = self.save_dir
+        dir_path = QFileDialog.getExistingDirectory(self, "选择模型保存文件夹", default_dir)
+        if dir_path:
+            self.save_dir = dir_path
+            self.save_path_label.setText(dir_path)
+            QMessageBox.information(self, "成功", f"模型保存路径已设置为：\n{dir_path}")
+
     def start(self):
         p = self.path.text().strip()
         if not p:
@@ -362,7 +409,8 @@ class TrainTab(QWidget):
             float(self.lr.text()),
             p,
             mode,
-            self.test_ratio.value()
+            self.test_ratio.value(),
+            self.save_dir  # 传入设置好的路径
         )
         self.thread.log_signal.connect(self.log.append)
         self.thread.process_signal.connect(self.status.setText)
@@ -397,6 +445,7 @@ class TrainTab(QWidget):
         self.ax3.grid(True, alpha=0.3)
 
         self.canvas.draw()
+
 
 # ===================== 预测界面 =====================
 class PredictTab(QWidget):
@@ -501,6 +550,7 @@ class PredictTab(QWidget):
         self.prob_lab.setText(f"置信度：{val.item():.2%}")
         self.img_lab.setPixmap(QPixmap(p).scaled(450, 450, Qt.KeepAspectRatio))
 
+
 # ===================== 主窗口 =====================
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -535,6 +585,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(TrainTab(), "🧠 模型训练")
         tabs.addTab(PredictTab(), "🔍 图片预测")
         self.setCentralWidget(tabs)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
